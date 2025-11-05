@@ -1,122 +1,185 @@
+; FIXME:
+; - Why this does not show in the Task Manager?
+
 ; procguard.ahk
 ; Version: 2.0.0
-; Ensures a list of processes are always running, based on a configuration file.
-; It checks each process at its specified interval and launches it if it's not found.
-
-#NoTrayIcon
-#SingleInstance Force
+; Monitor target processes and run specific EXEs if not found
+#NoEnv
+#SingleInstance, Force
+#Persistent
 SetBatchLines, -1
+SetTitleMatchMode, 2
 
-; --- Log file ---
-logFile := A_ScriptDir "\procguard.log"
+; --- Hidden 1x1 GUI so Windows treats it as an App (for Task Manager visibility) ---
+Gui, +LastFound +AlwaysOnTop +ToolWindow -Caption
+Gui, Show, w1 h1, ProcGuardHidden
+
+; --- Paths ---
+scriptDir := A_ScriptDir
+confFile := scriptDir "\procguard.conf"
+logFile := scriptDir "\procguard.log"
 enableLog := FileExist(logFile)
+; enableLog := true  ; always enable logging
+maxLogSize := 1024 * 512 ; 0.5 MB
 
+; --- Logging function (newest logs at top, rolling, efficient) ---
 log(msg) {
-    global enableLog, logFile
-    if (enableLog) {
-        timeStamp := A_Now
-        FormatTime, timeStr, %timeStamp%, yyyy-MM-dd HH:mm:ss
-        newLine := "[" timeStr "] " msg "`r`n"
-        FileAppend, %newLine%, %logFile%
+    global enableLog, logFile, maxLogSize
+    if (!enableLog)
+        return
+
+    ; Prepare new line
+    timeStamp := A_Now
+    FormatTime, timeStr, %timeStamp%, yyyy-MM-dd HH:mm:ss
+    newLine := "[" timeStr "] " msg "`r`n"
+
+    ; Read only the last maxLogSize bytes (newest portion)
+    oldContent := ""
+    if FileExist(logFile) {
+        file := FileOpen(logFile, "r")
+        if IsObject(file) {
+            file.Seek(0, 2)  ; go to end
+            fileSize := file.Pos
+            readPos := (fileSize > maxLogSize) ? fileSize - maxLogSize : 0
+            file.Seek(readPos)
+            oldContent := file.Read(fileSize - readPos)
+            file.Close()
+        }
     }
+
+    ; Prepend new line (newest at top)
+    newContent := newLine . oldContent
+
+    ; Truncate to maxLogSize if necessary
+    if StrLen(newContent) > maxLogSize {
+        newContent := SubStr(newContent, 1, maxLogSize)
+        ; Optional: trim to last complete line
+        pos := InStr(newContent, "`n", false, 0)
+        if (pos)
+            newContent := SubStr(newContent, 1, pos - 1)
+    }
+
+    ; Overwrite file
+    FileDelete, %logFile%
+    FileAppend, %newContent%, %logFile%
 }
 
-; --- Task Storage ---
-global tasks := []
+; --- Arrays ---
+checkProcs := []     ; the process names to check
+runCmds := []        ; full command to execute if missing
+intervals := []      ; in ms
+lastChecks := []     ; last tick count
+lastConfTime := 0
 
-LoadConfig() {
-    global tasks
-    configFile := A_ScriptDir "\procguard.conf"
-    if (!FileExist(configFile)) {
-        log("❌ Configuration file not found: " configFile ". Exiting.")
-        MsgBox, 48, ProcGuard Error, Configuration file not found:`n%configFile%
-        ExitApp
-    }
+; --- Load config (hot reload) ---
+ReloadConfig() {
+    global checkProcs, runCmds, intervals, lastChecks, confFile
 
-    log("⚙️ Reading configuration from: " configFile)
-    newTasks := []
-    Loop, Read, %configFile%
+    checkProcs := []
+    runCmds := []
+    intervals := []
+    lastChecks := []
+
+    Loop, Read, %confFile%
     {
-        line := A_LoopReadLine
-        if (RegExMatch(line, "^\s*(#|$)")) ; Skip comments and empty lines
+        line := Trim(A_LoopReadLine)
+        if (line = "" || SubStr(line,1,1) = "#")
             continue
 
         parts := StrSplit(line, ",")
-        if (parts.Length() < 2) {
-            log("⚠️ Invalid config line (skipping, not enough parts): " line)
+        if (parts.Length() < 2)
             continue
-        }
 
-        processName := Trim(parts[1])
-        intervalSeconds := Trim(parts[parts.Length()])
+        checkName := Trim(parts[1])
+        runCmd := Trim(parts[2])
+        interval := (parts.Length() >= 3 && RegExMatch(Trim(parts[3]), "^\d+$")) ? Trim(parts[3]) : 10
 
-        ; Reconstruct the command from the middle parts
-        runCommand := ""
-        Loop, % parts.Length() - 2 {
-            runCommand .= parts[A_Index + 1] . (A_Index < parts.Length() - 2 ? "," : "")
-        }
-        runCommand := Trim(runCommand)
-        
-        ; If there are only 2 parts, the command is the same as the process name
-        if (parts.Length() = 2) {
-            runCommand := processName
-        }
+        checkProcs.Push(checkName)
+        runCmds.Push(runCmd)
+        intervals.Push(interval * 1000)
+        lastChecks.Push(0)
 
-
-        if !(processName && runCommand && IsNumber(intervalSeconds) && intervalSeconds > 0) {
-            log("⚠️ Invalid config line (skipping, invalid data): " line)
-            continue
-        }
-        
-        ; Check if task already exists to preserve its lastCheck time
-        found := false
-        for i, existingTask in tasks {
-            if (existingTask.name = processName) {
-                existingTask.command := runCommand
-                existingTask.interval := intervalSeconds * 1000
-                newTasks.Push(existingTask)
-                found := true
-                break
-            }
-        }
-        if (!found) {
-            newTasks.Push({name: processName, command: runCommand, interval: intervalSeconds * 1000, lastCheck: 0})
-        }
+        log("🔄 [Hot-Reload] Monitoring " checkName " → will run [" runCmd "] every " interval "s")
     }
-    tasks := newTasks
-    log("✅ Configuration loaded. " tasks.Length() " tasks found.")
 }
 
-; --- Main ---
-log("🚀 ProcGuard starting up.")
-LoadConfig()
+; --- Initial config load ---
+if !FileExist(confFile) {
+    log("❌ Config file missing. Exiting.")
+    MsgBox, 16, ProcGuard, Config file procguard.conf not found. Exiting.
+    ExitApp
+}
+ReloadConfig()
 
-; Use a timer to reload config periodically without blocking the main loop
-SetTimer, LoadConfig, 60000 ; Reload config every 60 seconds
+; --- Timer ---
+SetTimer, MonitorProcesses, 1000
+return
 
-if (tasks.Length() = 0) {
-    log("No valid tasks found in configuration. Idling.")
+; --- Monitoring loop ---
+MonitorProcesses:
+now := A_TickCount
+
+; --- Hot reload config ---
+FileGetTime, modTime, %confFile%, M
+if (modTime != lastConfTime) {
+    lastConfTime := modTime
+    ReloadConfig()
 }
 
-Loop {
-    currentTime := A_TickCount
-    for index, task in tasks
-    {
-        if ((currentTime - task.lastCheck) >= task.interval)
+Loop % checkProcs.Length()
+{
+    i := A_Index
+    if (now - lastChecks[i] < intervals[i])
+        continue
+    lastChecks[i] := now
+
+    checkName := checkProcs[i]
+    runCmd := runCmds[i]
+
+    SplitPath, checkName, checkBase
+    StringLower, checkBase, checkBase
+
+    ProcessExists := false
+    debugFound := ""
+
+    try {
+        wmi := ComObjGet("winmgmts:\\.\root\CIMV2")
+        q := "Select * from Win32_Process where Name='" checkBase "'"
+        for p in wmi.ExecQuery(q)
         {
-            task.lastCheck := currentTime
-            
-            Process, Exist, % task.name
-            processPID := ErrorLevel
-
-            if (processPID = 0) {
-                log("❗ Process not found: " task.name ". Launching...")
-                Run, % task.command
-                log("🚀 Launched: " task.command)
-            }
+            ProcessExists := true
+            debugFound := p.Name
+            break
         }
+    } catch {
+        log("⚠️ WMI query failed for " checkName ". Fallback to Process, Exist.")
+        Process, Exist, %checkBase%
+        debugFound := ErrorLevel ? checkBase : ""
+        if (ErrorLevel)
+            ProcessExists := true
     }
-    Sleep, 1000 ; Main loop sleeps for 1 second to avoid busy-looping
-}
 
-return ; End of auto-execute section
+    log("🔎 Checking: " checkName " | Found: " debugFound)
+
+    if ProcessExists {
+        log("✅ " checkName " running. Skip [" runCmd "].")
+    } else {
+        log("🚀 Launching: " runCmd)
+        Run, %runCmd%, , Hide, newPID
+        Sleep, 100
+        if newPID
+            log("✅ Started PID " newPID " for " checkName)
+        else
+            log("⚠️ Failed to start " runCmd)
+    }
+}
+return
+
+; --- Tray ---
+Menu, Tray, Tip, ProcGuard - Monitoring Processes
+Menu, Tray, Add, Exit, ExitProc
+return
+
+ExitProc:
+log("🏁 ProcGuard exiting.")
+ExitApp
