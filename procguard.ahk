@@ -2,8 +2,8 @@
 ; - Why this does not show in the Task Manager?
 
 ; procguard.ahk
-; Version: 2.0.0
-; Monitor target processes and run specific EXEs if not found
+; Version: 2.1.0
+; Monitor target processes and run specific EXEs based on mode (normal or reverse)
 #NoEnv
 #SingleInstance, Force
 #Persistent
@@ -66,19 +66,21 @@ log(msg) {
 
 ; --- Arrays ---
 checkProcs := []     ; the process names to check
-runCmds := []        ; full command to execute if missing
+runCmds := []        ; full command to execute based on mode
 intervals := []      ; in ms
 lastChecks := []     ; last tick count
+modes := []          ; "normal" (default) or "reverse"
 lastConfTime := 0
 
 ; --- Load config (hot reload) ---
 ReloadConfig() {
-    global checkProcs, runCmds, intervals, lastChecks, confFile
+    global checkProcs, runCmds, intervals, lastChecks, modes, confFile
 
     checkProcs := []
     runCmds := []
     intervals := []
     lastChecks := []
+    modes := []
 
     Loop, Read, %confFile%
     {
@@ -87,19 +89,42 @@ ReloadConfig() {
             continue
 
         parts := StrSplit(line, ",")
+
+        ; Need at least process name and command
         if (parts.Length() < 2)
             continue
 
         checkName := Trim(parts[1])
         runCmd := Trim(parts[2])
-        interval := (parts.Length() >= 3 && RegExMatch(Trim(parts[3]), "^\d+$")) ? Trim(parts[3]) : 10
+
+        ; Optional third field: interval in seconds (numeric)
+        interval := 10
+        if (parts.Length() >= 3) {
+            third := Trim(parts[3])
+            if RegExMatch(third, "^\d+$")
+                interval := third
+        }
+
+        ; Optional fourth field: mode ("reverse" or default)
+        mode := "normal"
+        if (parts.Length() >= 4) {
+            extra := Trim(parts[4])
+            StringLower, extraLower, extra
+            if (extraLower = "reverse")
+                mode := "reverse"
+        }
 
         checkProcs.Push(checkName)
         runCmds.Push(runCmd)
         intervals.Push(interval * 1000)
         lastChecks.Push(0)
+        modes.Push(mode)
 
-        log("🔄 [Hot-Reload] Monitoring " checkName " → will run [" runCmd "] every " interval "s")
+        if (mode = "reverse") {
+            log("🔄 [Hot-Reload] Monitoring " checkName " (reverse) → will run [" runCmd "] every " interval "s WHEN running")
+        } else {
+            log("🔄 [Hot-Reload] Monitoring " checkName " → will run [" runCmd "] every " interval "s WHEN missing")
+        }
     }
 }
 
@@ -135,6 +160,7 @@ Loop % checkProcs.Length()
 
     checkName := checkProcs[i]
     runCmd := runCmds[i]
+    mode := modes[i]
 
     SplitPath, checkName, checkBase
     StringLower, checkBase, checkBase
@@ -159,18 +185,35 @@ Loop % checkProcs.Length()
             ProcessExists := true
     }
 
-    log("🔎 Checking: " checkName " | Found: " debugFound)
+    log("🔎 Checking: " checkName " | Found: " debugFound " | Mode: " mode)
 
-    if ProcessExists {
-        log("✅ " checkName " running. Skip [" runCmd "].")
+    ; --- Behavior based on mode ---
+    if (mode = "reverse") {
+        ; Reverse logic: run when process DOES exist
+        if ProcessExists {
+            log("✅ " checkName " running. Reverse-mode: executing [" runCmd "].")
+            Run, %runCmd%, , Hide, newPID
+            Sleep, 100
+            if newPID
+                log("✅ [reverse] Started PID " newPID " for " checkName)
+            else
+                log("⚠️ [reverse] Failed to start " runCmd)
+        } else {
+            log("⏭️ " checkName " not running. Reverse-mode: skipping [" runCmd "].")
+        }
     } else {
-        log("🚀 Launching: " runCmd)
-        Run, %runCmd%, , Hide, newPID
-        Sleep, 100
-        if newPID
-            log("✅ Started PID " newPID " for " checkName)
-        else
-            log("⚠️ Failed to start " runCmd)
+        ; Normal logic (existing behavior): run when process is NOT running
+        if ProcessExists {
+            log("✅ " checkName " running. Skip [" runCmd "].")
+        } else {
+            log("🚀 Launching: " runCmd)
+            Run, %runCmd%, , Hide, newPID
+            Sleep, 100
+            if newPID
+                log("✅ Started PID " newPID " for " checkName)
+            else
+                log("⚠️ Failed to start " runCmd)
+        }
     }
 }
 return

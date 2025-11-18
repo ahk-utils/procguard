@@ -1,6 +1,6 @@
 # ProcGuard
 
-![Version](https://img.shields.io/badge/version-2.0.0-blue)
+![Version](https://img.shields.io/badge/version-2.1.0-blue)
 
 A persistent, configuration-driven process manager for Windows. It ensures a list of specified applications are always running. If a monitored process is not found, ProcGuard will automatically launch it.
 
@@ -13,6 +13,7 @@ It is written in [AutoHotkey](https://www.autohotkey.com/).
 - **Flexible Launch Commands**: For each process, you can specify a simple executable name or a full command with a path and arguments.
 - **Live Configuration Reload**: Automatically reloads the configuration file, allowing you to change settings without restarting the script.
 - **Optional Logging**: Create an empty `procguard.log` file in the same directory to enable detailed logging of the script's actions.
+- **Normal or Reverse Mode**: For each entry, choose whether to run the command when the process is missing (default) or when it is present (reverse mode).
 
 ## Usage
 
@@ -33,22 +34,29 @@ Create a text file named `procguard.conf` in the same directory as the executabl
 The format for each line is a comma-separated list:
 
 ```
-ProcessName.exe,PathToExecutable [with arguments],IntervalSeconds
+ProcessName.exe,PathToExecutable [with arguments],IntervalSeconds[,Mode]
 ```
 
 - `ProcessName.exe`: The name of the process to check for (e.g., `notepad.exe`).
-- `PathToExecutable [with arguments]`: The full command to run if the process is not found. This can include a full path and any command-line arguments.
+- `PathToExecutable [with arguments]`: The full command to run based on the chosen mode. This can include a full path and any command-line arguments.
 - `IntervalSeconds`: The number of seconds to wait between checks for this specific process.
+- `Mode` (optional): Controls when the command is executed. Supported values:
+  - *(omitted)* or any value other than `reverse`: **normal mode** – run the command when the process is **not running**.
+  - `reverse`: **reverse mode** – run the command when the process **is running**.
 
 ### Example `procguard.conf`
 
 ```ini
 # =======
-# Follow the format below to set the configuration,
-# Executable binary name to be checked, path to the exe to be started, interval (seconds)
+# Follow the format below to set the configuration
+# Executable binary name to be checked, path to the exe to be started, interval (seconds), optional mode
+# Mode:
+#   (omitted or anything except "reverse") → run when process is NOT running
+#   "reverse" → run when process IS running
 # =======
 
 # Ensure GoldenDict is running, check every 10 minutes (600 seconds)
+# Normal mode (default): if GoldenDict.exe is missing, start it
 GoldenDict.exe,C:\Path\to\GoldenDict\GoldenDict.exe,600
 
 # Ensure Listary is running, check every 10 minutes
@@ -59,6 +67,10 @@ WeaselDeployer.exe,C:\Path\to\RimeIMEPortable\weasel\WeaselDeployer.exe /sync,14
 
 # Keep a simple background utility active, check every minute
 CoffeeBean.exe,C:\Path\to\CoffeeBean.exe,60
+
+# Reversed behavior
+# When Everything.exe IS running, execute the command every 10 minutes
+Everything.exe,C:\Path\to\Everything.exe -reindex -startup,3600,reverse
 ```
 
 ## Building from Source
